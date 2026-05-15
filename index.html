@@ -301,24 +301,18 @@ body{background:var(--bg);color:var(--text);font-family:'Noto Sans KR',sans-seri
 
 </div>
 <script>
-// iTunes API 호출 - 직접 + 프록시 fallback
-async function itunesFetch(url){
-  const proxies=[
-    {name:'직접', fn:u=>u},
-    {name:'allorigins', fn:u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`},
-    {name:'corsproxy.io', fn:u=>`https://corsproxy.io/?${encodeURIComponent(u)}`},
-    {name:'cors-anywhere', fn:u=>`https://cors-anywhere.herokuapp.com/${u}`},
-  ];
-  const logs=[];
-  for(const proxy of proxies){
-    try{
-      const res=await fetch(proxy.fn(url),{signal:AbortSignal.timeout(6000)});
-      if(!res.ok){logs.push(`${proxy.name}: HTTP ${res.status}`);continue;}
-      const data=await res.json();
-      if(data){logs.push(`${proxy.name}: ✅ 성공`);console.log(logs.join(' | '));return data;}
-    }catch(e){logs.push(`${proxy.name}: ❌ ${e.message}`);}
-  }
-  throw new Error('모든 연결 실패\n\n' + logs.join('\n'));
+// Gemini 검색
+async function geminiSearch(q, stype){
+  const typeLabel = stype==='song'?'곡':stype==='album'?'앨범':'아티스트';
+  const prompt=`음악 검색: "${q}" (유형: ${typeLabel})
+
+다음 JSON 형식으로 정확히 10개 이하 결과를 반환하세요. JSON만 출력, 다른 텍스트 절대 없이.
+
+{"results":[{"type":"${stype}","title":"곡/앨범/아티스트명","artist":"아티스트명","album":"앨범명(곡인경우)","year":"발매년도","genre":"장르","emoji":"이모지1개"}]}`;
+  const raw=await callGemini(prompt,null,[],null,2,true);
+  const clean=raw.replace(/\`\`\`json|\`\`\`/g,'').trim();
+  const data=JSON.parse(clean);
+  return data.results||[];
 }
 
 const API_KEYS=['AIzaSyAlrVvlj3DeJTJ-LwnEy9ywPAuElKGpwNo','AIzaSyBSqOLLMA60VVgJd4y5Lsso9hEf5dst8KU'];
@@ -416,16 +410,16 @@ function bcBack(){
 // ── SEARCH ──
 async function doSearch(){
   const q=document.getElementById('sq').value.trim();if(!q)return;
+  if(!S.key){alert('API 키가 없습니다!');return;}
   S.browseStack=[];hideBreadcrumb();
   const area=document.getElementById('results');
   area.innerHTML='<div class="loading"><div class="spin"></div>검색 중...</div>';
   document.getElementById('pagination').style.display='none';
   try{
-    const itunesUrl=`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=${S.stype}&limit=50&country=KR`;
-    const data=await itunesFetch(itunesUrl);
-    S.searchResults=data.results||[];
-    if(!S.searchResults.length){area.innerHTML='<div class="empty"><div class="ico">😢</div>검색 결과가 없습니다</div>';return;}
-    renderResults(S.searchResults,0);
+    const items=await geminiSearch(q,S.stype);
+    S.searchResults=items;
+    if(!items.length){area.innerHTML='<div class="empty"><div class="ico">😢</div>검색 결과가 없습니다</div>';return;}
+    renderResults(items,0);
   }catch(e){area.innerHTML=`<div class="empty"><div class="ico">⚠️</div>검색 실패: ${esc(e.message)}</div>`;}
 }
 
@@ -471,17 +465,11 @@ function renderResults(items,page){
 function makeResultItem(item){
   const div=document.createElement('div');div.className='ri';
   div.onclick=()=>selectItem(item);
-  let title='',sub='',badge='',img='';
-  if(S.stype==='song'){
-    title=item.trackName||'';sub=(item.artistName||'')+' · '+(item.collectionName||'');
-    badge=item.releaseDate?.substring(0,4)||'';img=item.artworkUrl60||'';
-  }else if(S.stype==='album'){
-    title=item.collectionName||'';sub=item.artistName||'';
-    badge=item.trackCount?item.trackCount+'곡':'';img=item.artworkUrl60||'';
-  }else{
-    title=item.artistName||'';sub=item.primaryGenreName||'';
-  }
-  div.innerHTML=`<div class="ri-img">${img?`<img src="${img}" loading="lazy">`:'🎵'}</div><div class="ri-info"><div class="ri-title">${esc(title)}</div><div class="ri-sub">${esc(sub)}</div></div>${badge?`<div class="ri-badge">${esc(String(badge))}</div>`:''}`;
+  const title=item.title||item.trackName||item.collectionName||item.artistName||'';
+  const sub=item.artist?(item.artist+(item.album?' · '+item.album:'')):(item.genre||'');
+  const badge=item.year||'';
+  const emoji=item.emoji||'🎵';
+  div.innerHTML=`<div class="ri-img" style="font-size:1.6rem">${emoji}</div><div class="ri-info"><div class="ri-title">${esc(title)}</div><div class="ri-sub">${esc(sub)}</div></div>${badge?`<div class="ri-badge">${esc(badge)}</div>`:''}`;
   return div;
 }
 
@@ -552,23 +540,24 @@ async function loadArtistAlbums(artist){
   }
 }
 
-function renderList(items,isTrackList,artistName,artUrl){
+function renderList(items,isTrackList,artistName){
   const area=document.getElementById('results');
   area.innerHTML='';
   if(!items.length){area.innerHTML='<div class="empty"><div class="ico">😢</div>항목이 없습니다</div>';return;}
   items.forEach((item,idx)=>{
     const div=document.createElement('div');div.className='ri';
+    const emoji=item.emoji||'🎵';
     if(isTrackList){
-      // 트랙 아이템
-      const trackArt=(artUrl||'')||(item.artworkUrl100||item.artworkUrl60||'').replace('100x100bb','600x600bb');
-      div.onclick=()=>loadTrack(item.trackName,artistName||item.artistName,trackArt);
-      div.innerHTML=`<div class="ri-img" style="font-size:.85rem;color:var(--muted);font-family:'DM Mono',monospace;font-weight:600">${item.trackNumber||idx+1}</div><div class="ri-info"><div class="ri-title">${esc(item.trackName||'')}</div><div class="ri-sub">${item.trackTimeMillis?fmtMs(item.trackTimeMillis):''}</div></div>`;
+      const title=item.title||item.trackName||'';
+      const dur=item.duration||'';
+      const num=item.trackNumber||idx+1;
+      div.onclick=()=>loadTrack(title,artistName||item.artist||'','');
+      div.innerHTML=`<div class="ri-img" style="font-size:.85rem;color:var(--muted);font-family:'DM Mono',monospace;font-weight:600">${num}</div><div class="ri-info"><div class="ri-title">${esc(title)}</div><div class="ri-sub">${esc(dur)}</div></div>`;
     }else{
-      // 앨범 아이템 (아티스트 드릴다운)
-      const img=item.artworkUrl60||'';
-      div.onclick=()=>loadAlbumTracks(item);
-      const albumImg=item.artworkUrl60||item.artworkUrl100||'';
-      div.innerHTML=`<div class="ri-img">${albumImg?`<img src="${albumImg}" loading="lazy">`:'💿'}</div><div class="ri-info"><div class="ri-title">${esc(item.collectionName||'')}</div><div class="ri-sub">${item.releaseDate?.substring(0,4)||''} ${item.trackCount?'· '+item.trackCount+'곡':''}</div></div>`;
+      const title=item.title||item.collectionName||'';
+      const year=item.year||'';
+      div.onclick=()=>selectItem({...item,type:'album'});
+      div.innerHTML=`<div class="ri-img" style="font-size:1.4rem">${emoji}</div><div class="ri-info"><div class="ri-title">${esc(title)}</div><div class="ri-sub">${esc(year)}</div></div>`;
     }
     area.appendChild(div);
   });
@@ -855,7 +844,7 @@ function addBbl(c,t,r){const d=document.createElement('div');d.className='bbl '+
 
 // ── GEMINI ──
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
-async function callGemini(prompt,statusElId=null,history=[],sysOverride=null,retries=4){
+async function callGemini(prompt,statusElId=null,history=[],sysOverride=null,retries=4,jsonMode=false){
   await sleep(1000);
   const sysText=sysOverride||'당신은 음악 전문가 AI입니다. 가사 분석, 번역, 음악 역사에 대한 깊이 있는 통찰을 제공합니다. 한국어로 답변하세요.';
   for(let i=0;i<retries;i++){
@@ -866,7 +855,7 @@ async function callGemini(prompt,statusElId=null,history=[],sysOverride=null,ret
          body:JSON.stringify({
            contents:[...history,{role:'user',parts:[{text:prompt}]}],
            systemInstruction:{parts:[{text:sysText}]},
-           generationConfig:{temperature:0.8,maxOutputTokens:65536}
+           generationConfig:{temperature:jsonMode?0.2:0.8,maxOutputTokens:jsonMode?4096:65536}
          })}
       );
       const d=await res.json();
